@@ -15,12 +15,16 @@ import {
 	USER_STORAGE_LIMIT_BYTES,
 } from './storage.js';
 
+const MAX_FILES_PER_BATCH = 30;
+const BATCH_LIMIT_TEXT = 'Можно загрузить не более 30 файлов за раз.';
+
 const START_TEXT =
 	'Загрузите изображения или шрифт — после загрузки появятся кнопки действий.\n\n' +
-	'Можно:\n' +
-	'• минифицировать изображения\n' +
-	'• минифицировать и преобразовать в WebP\n' +
-	'• преобразовать TTF в WOFF2\n\n' +
+	'За одну загрузку можно отправить не больше 30 файлов.\n\n' +
+	'После загрузки доступны кнопки:\n' +
+	'• Минифицировать — любая графика: растровая (JPG, PNG, GIF, WebP, ICO) и векторная (SVG)\n' +
+	'• Минифицировать и преобразовать в WebP — растр минифицируется и преобразуется в WebP, вектор (SVG) только минифицируется. Растр и вектор можно загрузить вместе.\n' +
+	'• Преобразовать в WOFF2 — шрифты TTF\n\n' +
 	'Для исходного качества лучше отправлять изображения файлом, а не фото — Telegram сжимает фото.';
 
 const albumTimers = new Map();
@@ -28,9 +32,51 @@ const lastMenu = new Map();
 const busyUsers = new Set();
 /** File kinds accumulated during the current upload debounce window. */
 const pendingUploadBatch = new Map();
+/** In-flight downloads per user — menu must wait until this is 0. */
+const uploadInflight = new Map();
 
 export function isUserBusy(userId) {
 	return busyUsers.has(Number(userId));
+}
+
+function beginUpload(userId) {
+	uploadInflight.set(userId, (uploadInflight.get(userId) || 0) + 1);
+}
+
+function endUpload(userId) {
+	const next = (uploadInflight.get(userId) || 1) - 1;
+	if (next <= 0) {
+		uploadInflight.delete(userId);
+	} else {
+		uploadInflight.set(userId, next);
+	}
+}
+
+async function ensureUploadingMessage(bot, chatId, userId) {
+	// Once per pending batch — handlers often finish one file before the next starts,
+	// so inflight briefly hits 0 and must not recreate the status message.
+	const batch = pendingUploadBatch.get(userId);
+	if (!batch || batch.uploadingMessageSent) {
+		return;
+	}
+	batch.uploadingMessageSent = true;
+
+	const previousId = lastMenu.get(userId);
+	if (previousId) {
+		try {
+			await bot.api.deleteMessage(chatId, previousId);
+		} catch {
+			// Previous menu may already be gone.
+		}
+		lastMenu.delete(userId);
+	}
+
+	try {
+		const message = await bot.api.sendMessage(chatId, 'Загружаю файлы…');
+		lastMenu.set(userId, message.message_id);
+	} catch (error) {
+		console.error('Failed to send uploading message:', error);
+	}
 }
 
 function emptyInventory() {
@@ -43,7 +89,30 @@ function emptyInventory() {
 		hasImages: false,
 		hasRaster: false,
 		hasFonts: false,
+		limitWarned: false,
+		uploadingMessageSent: false,
 	};
+}
+
+function batchFileCount(batch) {
+	if (!batch) {
+		return 0;
+	}
+	return (batch.raster || 0) + (batch.svg || 0) + (batch.ico || 0) + (batch.font || 0);
+}
+
+async function rejectIfBatchFull(ctx, bot, userId) {
+	const batch = pendingUploadBatch.get(userId);
+	const count = batchFileCount(batch);
+	if (count < MAX_FILES_PER_BATCH) {
+		return false;
+	}
+	if (batch && !batch.limitWarned) {
+		batch.limitWarned = true;
+		await ctx.reply(BATCH_LIMIT_TEXT);
+	}
+	scheduleActionMenu(bot, ctx.chat.id, userId);
+	return true;
 }
 
 function inventoryFromCounts(counts) {
@@ -82,6 +151,26 @@ function noteUploadKind(userId, kind) {
 	batch.hasFonts = batch.font > 0;
 }
 
+function unnoteUploadKind(userId, kind) {
+	const batch = pendingUploadBatch.get(userId);
+	if (!batch) {
+		return;
+	}
+	if (kind === 'raster' && batch.raster > 0) {
+		batch.raster -= 1;
+	} else if (kind === 'svg' && batch.svg > 0) {
+		batch.svg -= 1;
+	} else if (kind === 'ico' && batch.ico > 0) {
+		batch.ico -= 1;
+	} else if (kind === 'font' && batch.font > 0) {
+		batch.font -= 1;
+	}
+	batch.images = batch.raster + batch.svg + batch.ico;
+	batch.hasImages = batch.images > 0;
+	batch.hasRaster = batch.raster > 0;
+	batch.hasFonts = batch.font > 0;
+}
+
 function takeUploadBatch(userId) {
 	const batch = pendingUploadBatch.get(userId);
 	pendingUploadBatch.delete(userId);
@@ -103,7 +192,7 @@ function inventorySummary(inventory) {
 		parts.push(`TTF: ${inventory.font}`);
 	}
 	if (!parts.length) {
-		return 'Файлов пока нет. Загрузите изображения или шрифт (TTF).';
+		return 'Успешно. Загрузите изображения или шрифт — после загрузки появятся кнопки действий.';
 	}
 	return `Загружено (${parts.join(', ')}). Выберите действие:`;
 }
@@ -161,6 +250,11 @@ function scheduleActionMenu(bot, chatId, userId) {
 	}
 
 	const timer = setTimeout(() => {
+		const inflight = uploadInflight.get(userId) || 0;
+		if (inflight > 0) {
+			scheduleActionMenu(bot, chatId, userId);
+			return;
+		}
 		albumTimers.delete(userId);
 		const batch = takeUploadBatch(userId);
 		warnIfOverQuota(bot, chatId, userId)
@@ -250,6 +344,7 @@ export function createBot(token) {
 		await ensureUserDirs(ctx.from.id);
 		lastMenu.delete(ctx.from.id);
 		pendingUploadBatch.delete(ctx.from.id);
+		uploadInflight.delete(ctx.from.id);
 		await ctx.reply(START_TEXT, { reply_markup: { remove_keyboard: true } });
 	});
 
@@ -261,14 +356,23 @@ export function createBot(token) {
 		if (!photo) {
 			return;
 		}
+		const userId = ctx.from.id;
+		if (await rejectIfBatchFull(ctx, bot, userId)) {
+			return;
+		}
+		noteUploadKind(userId, 'raster');
+		beginUpload(userId);
+		await ensureUploadingMessage(bot, ctx.chat.id, userId);
 		try {
 			const buffer = await downloadTelegramFile(bot, photo.file_id);
-			await saveIncoming(ctx.from.id, `photo-${photo.file_unique_id}.jpg`, buffer);
-			noteUploadKind(ctx.from.id, 'raster');
-			scheduleActionMenu(bot, ctx.chat.id, ctx.from.id);
+			await saveIncoming(userId, `photo-${photo.file_unique_id}.jpg`, buffer);
+			scheduleActionMenu(bot, ctx.chat.id, userId);
 		} catch (error) {
 			console.error(error);
+			unnoteUploadKind(userId, 'raster');
 			await ctx.reply('Не удалось сохранить фото.');
+		} finally {
+			endUpload(userId);
 		}
 	});
 
@@ -285,14 +389,23 @@ export function createBot(token) {
 			);
 			return;
 		}
+		const userId = ctx.from.id;
+		if (await rejectIfBatchFull(ctx, bot, userId)) {
+			return;
+		}
+		noteUploadKind(userId, kind);
+		beginUpload(userId);
+		await ensureUploadingMessage(bot, ctx.chat.id, userId);
 		try {
 			const buffer = await downloadTelegramFile(bot, document.file_id);
-			await saveIncoming(ctx.from.id, filename, buffer);
-			noteUploadKind(ctx.from.id, kind);
-			scheduleActionMenu(bot, ctx.chat.id, ctx.from.id);
+			await saveIncoming(userId, filename, buffer);
+			scheduleActionMenu(bot, ctx.chat.id, userId);
 		} catch (error) {
 			console.error(error);
+			unnoteUploadKind(userId, kind);
 			await ctx.reply('Не удалось сохранить файл.');
+		} finally {
+			endUpload(userId);
 		}
 	});
 

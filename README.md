@@ -4,7 +4,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](https://docs.docker.com/compose/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg)](https://core.telegram.org/bots)
 [![License](https://img.shields.io/badge/License-ISC-yellow.svg)](https://opensource.org/licenses/ISC)
-[![Version](https://img.shields.io/badge/Version-1.1.0-green.svg)](#changelog)
+[![Version](https://img.shields.io/badge/Version-1.3.0-green.svg)](#changelog)
 
 A Dockerized Telegram bot for image optimization and font conversion: raster images are minified and optionally converted to WebP, SVG and ICO files are minified in place, and TTF fonts are converted to WOFF2.
 
@@ -35,20 +35,19 @@ For local runs without Docker: Node.js 22 or higher and npm.
    ```
 3. Build and start:
    ```bash
-   docker compose up -d --build
+   make rebuild
    ```
+   Or without Make: `docker compose up -d --build`.
 4. Open the bot in Telegram and send `/start`.
 
-Logs:
+Docker Compose wrappers (`make help` lists all targets):
 
 ```bash
-docker compose logs -f
-```
-
-Stop:
-
-```bash
-docker compose down
+make help      # list commands
+make up        # start in background
+make restart   # restart the container
+make logs      # follow logs
+make down      # stop and remove the container
 ```
 
 User files persist in `./data` (mounted into the container as `/app/data`).
@@ -69,7 +68,7 @@ User files persist in `./data` (mounted into the container as `/app/data`).
 
 ### Start
 
-Send `/start`. The bot replies: upload images or a font. Telegram compresses photos — send images as **files** (documents) when you need the original quality.
+Send `/start`. The bot replies: upload images or a font. While files are downloading, it shows **Загружаю файлы…**. Telegram compresses photos — send images as **files** (documents) when you need the original quality.
 
 ### Inline actions (after upload)
 
@@ -139,6 +138,7 @@ minifi-bot/
 ├── data/                     # Per-user files (gitignored, Docker volume)
 ├── Dockerfile
 ├── docker-compose.yml
+├── Makefile                  # docker compose wrappers (make help)
 ├── .env.example
 ├── .env                      # BOT_TOKEN (gitignored)
 ├── package.json
@@ -154,6 +154,14 @@ minifi-bot/
 - **Outputs disappeared** — files are removed after a successful send, or 10 minutes after upload if they were never sent. The **Clear files** button empties the whole user folder when storage exceeds 200 MB.
 
 ## Changelog
+
+### 1.3.0
+
+- **NEW**: Show a loading message while files are downloading from Telegram
+
+### 1.2.0
+
+- **NEW**: Limit each upload batch to 30 files; extra files in the same burst are not saved, with one warning
 
 ### 1.1.0
 
