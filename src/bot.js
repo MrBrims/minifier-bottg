@@ -21,10 +21,10 @@ const BATCH_LIMIT_TEXT = 'Можно загрузить не более 30 фа�
 const START_TEXT =
 	'Загрузите изображения или шрифт — после загрузки появятся кнопки действий.\n\n' +
 	'За одну загрузку можно отправить не больше 30 файлов.\n\n' +
-	'Можно:\n' +
-	'• минифицировать изображения\n' +
-	'• минифицировать и преобразовать в WebP\n' +
-	'• преобразовать TTF в WOFF2\n\n' +
+	'После загрузки доступны кнопки:\n' +
+	'• Минифицировать — любая графика: растровая (JPG, PNG, GIF, WebP, ICO) и векторная (SVG)\n' +
+	'• Минифицировать и преобразовать в WebP — растр минифицируется и преобразуется в WebP, вектор (SVG) только минифицируется. Растр и вектор можно загрузить вместе.\n' +
+	'• Преобразовать в WOFF2 — шрифты TTF\n\n' +
 	'Для исходного качества лучше отправлять изображения файлом, а не фото — Telegram сжимает фото.';
 
 const albumTimers = new Map();
@@ -52,6 +52,33 @@ function endUpload(userId) {
 	}
 }
 
+async function ensureUploadingMessage(bot, chatId, userId) {
+	// Once per pending batch — handlers often finish one file before the next starts,
+	// so inflight briefly hits 0 and must not recreate the status message.
+	const batch = pendingUploadBatch.get(userId);
+	if (!batch || batch.uploadingMessageSent) {
+		return;
+	}
+	batch.uploadingMessageSent = true;
+
+	const previousId = lastMenu.get(userId);
+	if (previousId) {
+		try {
+			await bot.api.deleteMessage(chatId, previousId);
+		} catch {
+			// Previous menu may already be gone.
+		}
+		lastMenu.delete(userId);
+	}
+
+	try {
+		const message = await bot.api.sendMessage(chatId, 'Загружаю файлы…');
+		lastMenu.set(userId, message.message_id);
+	} catch (error) {
+		console.error('Failed to send uploading message:', error);
+	}
+}
+
 function emptyInventory() {
 	return {
 		raster: 0,
@@ -63,6 +90,7 @@ function emptyInventory() {
 		hasRaster: false,
 		hasFonts: false,
 		limitWarned: false,
+		uploadingMessageSent: false,
 	};
 }
 
@@ -164,7 +192,7 @@ function inventorySummary(inventory) {
 		parts.push(`TTF: ${inventory.font}`);
 	}
 	if (!parts.length) {
-		return 'Файлов пока нет. Загрузите изображения или шрифт (TTF).';
+		return 'Успешно. Загрузите изображения или шрифт — после загрузки появятся кнопки действий.';
 	}
 	return `Загружено (${parts.join(', ')}). Выберите действие:`;
 }
@@ -334,6 +362,7 @@ export function createBot(token) {
 		}
 		noteUploadKind(userId, 'raster');
 		beginUpload(userId);
+		await ensureUploadingMessage(bot, ctx.chat.id, userId);
 		try {
 			const buffer = await downloadTelegramFile(bot, photo.file_id);
 			await saveIncoming(userId, `photo-${photo.file_unique_id}.jpg`, buffer);
@@ -366,6 +395,7 @@ export function createBot(token) {
 		}
 		noteUploadKind(userId, kind);
 		beginUpload(userId);
+		await ensureUploadingMessage(bot, ctx.chat.id, userId);
 		try {
 			const buffer = await downloadTelegramFile(bot, document.file_id);
 			await saveIncoming(userId, filename, buffer);
