@@ -158,6 +158,7 @@ minifi-bot/
 ### 1.3.0
 
 - **NEW**: Show a loading message while files are downloading from Telegram
+- **CHANGED**: Raise upload batch limit from 30 to 100 files
 
 ### 1.2.0
 

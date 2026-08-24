@@ -22,6 +22,10 @@ const webpOptions = {
 	quality: 80,
 };
 
+/**
+ * SVGO preset-default is aggressive. Icons often rely on inherited stroke/fill, and
+ * dropping `viewBox` breaks scaling in browsers, so those two optimizations stay off.
+ */
 const svgoConfig = {
 	plugins: [
 		{
@@ -39,6 +43,11 @@ const svgoConfig = {
 	],
 };
 
+/**
+ * Re-encode a raster image in its original format.
+ * `animated: true` keeps GIF/WebP frames. `failOn: 'none'` lets Sharp accept truncated
+ * JPEGs that Telegram often produces when a user sends a photo instead of a document.
+ */
 export async function minifyRasterBuffer(buffer, ext) {
 	const image = sharp(buffer, { animated: true, failOn: 'none' });
 
@@ -78,6 +87,10 @@ export async function minifySvgBuffer(buffer, filePath) {
 	return Buffer.from(result.data);
 }
 
+/**
+ * Decode ICO frames as PNG, minify each frame, then pack them back into ICO.
+ * Tiny icons often get larger after re-encoding; in that case the original bytes are kept.
+ */
 export async function minifyIcoBuffer(buffer) {
 	try {
 		const images = await decodeIco(buffer, 'image/png');
@@ -104,6 +117,7 @@ export async function minifyIcoBuffer(buffer) {
 	return buffer;
 }
 
+/** Run `handler` for one file; convert thrown errors into a skip record for the batch. */
 async function processOne(filePath, handler) {
 	try {
 		const input = await fs.readFile(filePath);
@@ -116,6 +130,14 @@ async function processOne(filePath, handler) {
 	}
 }
 
+/**
+ * Process every file in `images/src`.
+ *
+ * - SVG: minify only, write to `dist/`. Never converted to WebP.
+ * - ICO: minify, write identical bytes to both `minific/` and `dist/` (format stays ICO).
+ * - Raster: write a same-format minify to `minific/`. If `toWebp`, also write WebP to `dist/`
+ *   and send that path; otherwise the minific file is what the user receives.
+ */
 export async function minifyImages(userId, { toWebp = false } = {}) {
 	const dirs = userDirs(userId);
 	const sources = await listSourceImages(userId);

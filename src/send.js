@@ -4,9 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { InputFile } from 'grammy';
 import archiver from 'archiver';
+import { t } from './i18n.js';
 
+/**
+ * Telegram chats get noisy if every processed file is sent as its own document.
+ * Two or fewer results are sent individually; more than that go in a single ZIP.
+ */
 const ZIP_THRESHOLD = 2;
 
+/** Pack files into a flat archive (basenames only — no user-directory paths leak out). */
 async function zipFiles(filePaths, zipPath) {
 	await new Promise((resolve, reject) => {
 		const output = createWriteStream(zipPath);
@@ -24,9 +30,14 @@ async function zipFiles(filePaths, zipPath) {
 	});
 }
 
-export async function sendResultFiles(bot, chatId, filePaths) {
+/**
+ * Deliver job outputs to the chat, then drop any temporary ZIP from the OS temp dir.
+ * An empty list means every source failed; the user is told rather than getting silence.
+ * `locale` comes from getLocale(userId) because this helper has no Telegram ctx.
+ */
+export async function sendResultFiles(bot, chatId, filePaths, locale) {
 	if (!filePaths.length) {
-		await bot.api.sendMessage(chatId, 'Не удалось обработать файлы.');
+		await bot.api.sendMessage(chatId, t(locale, 'processFailed'));
 		return;
 	}
 

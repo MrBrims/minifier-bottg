@@ -11,8 +11,24 @@ if (!token) {
 
 const bot = createBot(token);
 
-await bot.api.setMyCommands([{ command: 'start', description: 'Начать' }]);
+// Shown in Telegram's command menu (default English; Russian clients get the ru list).
+await bot.api.setMyCommands([
+	{ command: 'start', description: 'Start' },
+	{ command: 'lang', description: 'Language' },
+]);
+await bot.api.setMyCommands(
+	[
+		{ command: 'start', description: 'Начать' },
+		{ command: 'lang', description: 'Язык' },
+	],
+	{ language_code: 'ru' },
+);
 
+/**
+ * Periodic cleanup of idle files on disk.
+ * Users currently running minify / convert / clear are skipped so the sweeper
+ * cannot delete files that job is still reading or writing.
+ */
 function runTtlSweep() {
 	purgeExpiredFiles({ skipUser: isUserBusy }).catch((error) => {
 		console.error('TTL sweep failed:', error);
