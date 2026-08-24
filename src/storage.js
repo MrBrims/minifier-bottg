@@ -4,7 +4,7 @@ import { classifyByName } from './classify.js';
 
 // Persistent root for per-user working copies. In Docker this is typically a mounted volume
 // (`DATA_DIR`); locally it defaults to `./data` under the process cwd.
-const DATA_ROOT = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+export const DATA_ROOT = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 
 /** Idle files older than this (by mtime) are deleted by the TTL sweeper. */
 export const FILE_TTL_MS = 10 * 60 * 1000;
@@ -244,7 +244,11 @@ export async function purgeExpiredFiles({ skipUser } = {}) {
 	let userIds;
 	try {
 		const entries = await fs.readdir(DATA_ROOT, { withFileTypes: true });
-		userIds = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+		userIds = entries
+			// Numeric names are user trees; skip siblings like `prefs/` so TTL never
+			// treats a locale pin as an idle upload folder.
+			.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+			.map((entry) => entry.name);
 	} catch (error) {
 		if (error && error.code === 'ENOENT') {
 			return;

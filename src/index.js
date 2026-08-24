@@ -11,8 +11,18 @@ if (!token) {
 
 const bot = createBot(token);
 
-// Shown in Telegram's command menu; the only user-facing command this bot exposes.
-await bot.api.setMyCommands([{ command: 'start', description: 'Начать' }]);
+// Shown in Telegram's command menu (default English; Russian clients get the ru list).
+await bot.api.setMyCommands([
+	{ command: 'start', description: 'Start' },
+	{ command: 'lang', description: 'Language' },
+]);
+await bot.api.setMyCommands(
+	[
+		{ command: 'start', description: 'Начать' },
+		{ command: 'lang', description: 'Язык' },
+	],
+	{ language_code: 'ru' },
+);
 
 /**
  * Periodic cleanup of idle files on disk.

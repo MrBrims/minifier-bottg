@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { Bot, InlineKeyboard } from 'grammy';
 import { classifyByName, extensionFromMime, isImageKind } from './classify.js';
+import { applyLocaleOverride, getLocale, rememberLocale, t } from './i18n.js';
 import { convertFonts } from './process/fonts.js';
 import { minifyImages } from './process/images.js';
 import { sendResultFiles } from './send.js';
@@ -20,17 +21,11 @@ import {
  * so this is counted in memory (`pendingUploadBatch`), not by scanning the disk.
  */
 const MAX_FILES_PER_BATCH = 100;
-const BATCH_LIMIT_TEXT = 'Можно загрузить не более 100 файлов за раз.';
 
-const START_TEXT =
-	'📁 Загрузите изображения или шрифт — после загрузки появятся кнопки действий.\n\n' +
-	'<b>📎 Изображения загружайте как файлы: наведите на скрепку и выберите «Документ».</b>\n\n' +
-	'ℹ️ За одну загрузку можно отправить не больше 100 файлов.\n\n' +
-	'После загрузки доступны кнопки:\n' +
-	'🗜 <b>Минифицировать</b> — любая графика: растровая (JPG, PNG, GIF, WebP, ICO) и векторная (SVG)\n' +
-	'🖼 <b>Минифицировать и преобразовать в WebP</b> — растр минифицируется и преобразуется в WebP, вектор (SVG) только минифицируется. Растр и вектор можно загрузить вместе.\n' +
-	'🔤 <b>Преобразовать в WOFF2</b> — шрифты TTF\n' +
-	'🗑 <b>Очистить</b> — удалить все загруженные файлы';
+/** Translate using the locale resolved for this user ( /lang pin or Telegram language). */
+function userT(userId, key, params) {
+	return t(getLocale(userId), key, params);
+}
 
 /**
  * Per-user timer that fires after a burst of album/document updates stops.
@@ -100,7 +95,7 @@ async function ensureUploadingMessage(bot, chatId, userId) {
 	}
 
 	try {
-		const message = await bot.api.sendMessage(chatId, 'Загружаю файлы…');
+		const message = await bot.api.sendMessage(chatId, userT(userId, 'uploading'));
 		lastMenu.set(userId, message.message_id);
 	} catch (error) {
 		console.error('Failed to send uploading message:', error);
@@ -142,7 +137,7 @@ async function rejectIfBatchFull(ctx, bot, userId) {
 	}
 	if (batch && !batch.limitWarned) {
 		batch.limitWarned = true;
-		await ctx.reply(BATCH_LIMIT_TEXT);
+		await ctx.reply(userT(userId, 'batchLimit'));
 	}
 	scheduleActionMenu(bot, ctx.chat.id, userId);
 	return true;
@@ -213,32 +208,34 @@ function takeUploadBatch(userId) {
 	return batch ? inventoryFromCounts(batch) : emptyInventory();
 }
 
-function inventorySummary(inventory) {
+/** Status line under the action buttons, translated for this user. */
+function inventorySummary(userId, inventory) {
 	const parts = [];
 	if (inventory.raster) {
-		parts.push(`растр: ${inventory.raster}`);
+		parts.push(userT(userId, 'kindRaster', { count: inventory.raster }));
 	}
 	if (inventory.svg) {
-		parts.push(`SVG: ${inventory.svg}`);
+		parts.push(userT(userId, 'kindSvg', { count: inventory.svg }));
 	}
 	if (inventory.ico) {
-		parts.push(`ICO: ${inventory.ico}`);
+		parts.push(userT(userId, 'kindIco', { count: inventory.ico }));
 	}
 	if (inventory.font) {
-		parts.push(`TTF: ${inventory.font}`);
+		parts.push(userT(userId, 'kindTtf', { count: inventory.font }));
 	}
 	if (!parts.length) {
-		return 'Успешно. Загрузите изображения или шрифт — после загрузки появятся кнопки действий.';
+		return userT(userId, 'inventoryEmpty');
 	}
-	return `Загружено (${parts.join(', ')}). Выберите действие:`;
+	return userT(userId, 'inventoryLoaded', { parts: parts.join(', ') });
 }
 
-function actionKeyboard(inventory) {
+/** Inline actions; labels follow the user's locale. Hidden when the folder is empty. */
+function actionKeyboard(userId, inventory) {
 	const keyboard = new InlineKeyboard();
 	let hasButton = false;
 
 	if (inventory.hasFonts) {
-		keyboard.text('Преобразовать в WOFF2', 'act:woff2');
+		keyboard.text(userT(userId, 'btnWoff2'), 'act:woff2');
 		hasButton = true;
 	}
 
@@ -246,16 +243,16 @@ function actionKeyboard(inventory) {
 		if (hasButton) {
 			keyboard.row();
 		}
-		keyboard.text('Минифицировать', 'act:minify');
+		keyboard.text(userT(userId, 'btnMinify'), 'act:minify');
 		hasButton = true;
 		// SVG and ICO stay in their formats; the extra WebP button only makes sense with raster.
 		if (inventory.hasRaster) {
-			keyboard.row().text('Минифицировать и преобразовать в WebP', 'act:webp');
+			keyboard.row().text(userT(userId, 'btnWebp'), 'act:webp');
 		}
 	}
 
 	if (hasButton) {
-		keyboard.row().text('Очистить', 'act:clear_all');
+		keyboard.row().text(userT(userId, 'btnClear'), 'act:clear_all');
 	}
 
 	return hasButton ? keyboard : undefined;
@@ -267,8 +264,8 @@ function actionKeyboard(inventory) {
  */
 async function showActionMenu(bot, chatId, userId, inventory) {
 	const resolved = inventory ?? (await getInventory(userId));
-	const text = inventorySummary(resolved);
-	const replyMarkup = actionKeyboard(resolved);
+	const text = inventorySummary(userId, resolved);
+	const replyMarkup = actionKeyboard(userId, resolved);
 	const previousId = lastMenu.get(userId);
 
 	if (previousId) {
@@ -324,12 +321,10 @@ async function warnIfOverQuota(bot, chatId, userId) {
 		return;
 	}
 
-	const keyboard = new InlineKeyboard().text('Очистить файлы', 'act:clear_all');
-	await bot.api.sendMessage(
-		chatId,
-		'Превышен лимит хранения: в вашей папке больше 200 МБ файлов. Нажмите «Очистить файлы», чтобы удалить всё содержимое.',
-		{ reply_markup: keyboard },
-	);
+	const keyboard = new InlineKeyboard().text(userT(userId, 'btnClearFiles'), 'act:clear_all');
+	await bot.api.sendMessage(chatId, userT(userId, 'quotaExceeded'), {
+		reply_markup: keyboard,
+	});
 }
 
 async function downloadTelegramFile(bot, fileId) {
@@ -375,7 +370,7 @@ async function saveIncoming(userId, filename, buffer) {
 function withBusy(userId, fn) {
 	return async (ctx) => {
 		if (busyUsers.has(userId)) {
-			await ctx.reply('Дождитесь окончания текущей операции.');
+			await ctx.reply(userT(userId, 'busy'));
 			return;
 		}
 		busyUsers.add(userId);
@@ -390,6 +385,15 @@ function withBusy(userId, fn) {
 export function createBot(token) {
 	const bot = new Bot(token);
 
+	// Cache language_code (and load a /lang pin) so later replies that only have userId
+	// still pick the right catalog — album debounce and quota warnings have no ctx.
+	bot.use(async (ctx, next) => {
+		if (ctx.from) {
+			await rememberLocale(ctx.from.id, ctx.from.language_code);
+		}
+		await next();
+	});
+
 	bot.command('start', async (ctx) => {
 		if (!ctx.from) {
 			return;
@@ -399,10 +403,38 @@ export function createBot(token) {
 		pendingUploadBatch.delete(ctx.from.id);
 		uploadInflight.delete(ctx.from.id);
 		// Drop a leftover reply keyboard from older bot versions that used one.
-		await ctx.reply(START_TEXT, {
+		await ctx.reply(userT(ctx.from.id, 'start'), {
 			parse_mode: 'HTML',
 			reply_markup: { remove_keyboard: true },
 		});
+	});
+
+	bot.command('lang', async (ctx) => {
+		// Pin Russian, English, or follow the Telegram app language.
+		if (!ctx.from) {
+			return;
+		}
+		const locale = getLocale(ctx.from.id);
+		const keyboard = new InlineKeyboard()
+			.text(t(locale, 'btnLangRu'), 'lang:ru')
+			.text(t(locale, 'btnLangEn'), 'lang:en')
+			.row()
+			.text(t(locale, 'btnLangAuto'), 'lang:auto');
+		await ctx.reply(t(locale, 'langPrompt'), { reply_markup: keyboard });
+	});
+
+	bot.callbackQuery(/^lang:(ru|en|auto)$/, async (ctx) => {
+		if (!ctx.from) {
+			return;
+		}
+		const choice = ctx.match[1];
+		// Confirm in the locale that is now active (auto uses Telegram language_code).
+		await applyLocaleOverride(ctx.from.id, choice === 'auto' ? null : choice);
+		const locale = getLocale(ctx.from.id);
+		const confirmKey =
+			choice === 'ru' ? 'langSetRu' : choice === 'en' ? 'langSetEn' : 'langSetAuto';
+		await ctx.answerCallbackQuery();
+		await ctx.reply(t(locale, confirmKey));
 	});
 
 	bot.on('message:photo', async (ctx) => {
@@ -428,7 +460,7 @@ export function createBot(token) {
 		} catch (error) {
 			console.error(error);
 			unnoteUploadKind(userId, 'raster');
-			await ctx.reply('Не удалось сохранить фото.');
+			await ctx.reply(userT(userId, 'savePhotoFailed'));
 		} finally {
 			endUpload(userId);
 		}
@@ -442,9 +474,7 @@ export function createBot(token) {
 		const filename = documentFilename(document);
 		const kind = classifyByName(filename);
 		if (!kind) {
-			await ctx.reply(
-				'Поддерживаются изображения JPG, PNG, GIF, WebP, SVG, ICO и шрифты TTF.',
-			);
+			await ctx.reply(userT(ctx.from.id, 'unsupportedType'));
 			return;
 		}
 		const userId = ctx.from.id;
@@ -461,7 +491,7 @@ export function createBot(token) {
 		} catch (error) {
 			console.error(error);
 			unnoteUploadKind(userId, kind);
-			await ctx.reply('Не удалось сохранить файл.');
+			await ctx.reply(userT(userId, 'saveFileFailed'));
 		} finally {
 			endUpload(userId);
 		}
@@ -474,15 +504,15 @@ export function createBot(token) {
 		// Answer first — Telegram times out the loading spinner on the button otherwise.
 		await ctx.answerCallbackQuery();
 		await withBusy(ctx.from.id, async () => {
-			await ctx.reply('Преобразую шрифты в WOFF2…');
+			await ctx.reply(userT(ctx.from.id, 'convertingFonts'));
 			const { outputs, errors } = await convertFonts(ctx.from.id);
-			await sendResultFiles(bot, ctx.chat.id, outputs);
+			await sendResultFiles(bot, ctx.chat.id, outputs, getLocale(ctx.from.id));
 			// Keep sources when every file failed so the user can retry without re-uploading.
 			if (outputs.length) {
 				await clearFontJobFiles(ctx.from.id);
 			}
 			if (errors.length) {
-				await ctx.reply(`Пропущено файлов: ${errors.length}.`);
+				await ctx.reply(userT(ctx.from.id, 'skippedFiles', { count: errors.length }));
 			}
 			await showActionMenu(bot, ctx.chat.id, ctx.from.id);
 		})(ctx);
@@ -494,14 +524,14 @@ export function createBot(token) {
 		}
 		await ctx.answerCallbackQuery();
 		await withBusy(ctx.from.id, async () => {
-			await ctx.reply('Минифицирую изображения…');
+			await ctx.reply(userT(ctx.from.id, 'minifyingImages'));
 			const { outputs, errors } = await minifyImages(ctx.from.id, { toWebp: false });
-			await sendResultFiles(bot, ctx.chat.id, outputs);
+			await sendResultFiles(bot, ctx.chat.id, outputs, getLocale(ctx.from.id));
 			if (outputs.length) {
 				await clearImageJobFiles(ctx.from.id);
 			}
 			if (errors.length) {
-				await ctx.reply(`Пропущено файлов: ${errors.length}.`);
+				await ctx.reply(userT(ctx.from.id, 'skippedFiles', { count: errors.length }));
 			}
 			await showActionMenu(bot, ctx.chat.id, ctx.from.id);
 		})(ctx);
@@ -513,14 +543,14 @@ export function createBot(token) {
 		}
 		await ctx.answerCallbackQuery();
 		await withBusy(ctx.from.id, async () => {
-			await ctx.reply('Минифицирую и преобразую в WebP…');
+			await ctx.reply(userT(ctx.from.id, 'convertingWebp'));
 			const { outputs, errors } = await minifyImages(ctx.from.id, { toWebp: true });
-			await sendResultFiles(bot, ctx.chat.id, outputs);
+			await sendResultFiles(bot, ctx.chat.id, outputs, getLocale(ctx.from.id));
 			if (outputs.length) {
 				await clearImageJobFiles(ctx.from.id);
 			}
 			if (errors.length) {
-				await ctx.reply(`Пропущено файлов: ${errors.length}.`);
+				await ctx.reply(userT(ctx.from.id, 'skippedFiles', { count: errors.length }));
 			}
 			await showActionMenu(bot, ctx.chat.id, ctx.from.id);
 		})(ctx);
@@ -533,7 +563,7 @@ export function createBot(token) {
 		await ctx.answerCallbackQuery();
 		await withBusy(ctx.from.id, async () => {
 			await clearAllUserFiles(ctx.from.id);
-			await ctx.reply('Все файлы в вашей папке удалены.');
+			await ctx.reply(userT(ctx.from.id, 'filesCleared'));
 			await showActionMenu(bot, ctx.chat.id, ctx.from.id);
 		})(ctx);
 	});
