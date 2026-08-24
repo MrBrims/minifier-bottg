@@ -23,13 +23,14 @@ const MAX_FILES_PER_BATCH = 100;
 const BATCH_LIMIT_TEXT = 'Можно загрузить не более 100 файлов за раз.';
 
 const START_TEXT =
-	'Загрузите изображения или шрифт — после загрузки появятся кнопки действий.\n\n' +
-	'За одну загрузку можно отправить не больше 100 файлов.\n\n' +
+	'📁 Загрузите изображения или шрифт — после загрузки появятся кнопки действий.\n\n' +
+	'<b>📎 Изображения загружайте как файлы: наведите на скрепку и выберите «Документ».</b>\n\n' +
+	'ℹ️ За одну загрузку можно отправить не больше 100 файлов.\n\n' +
 	'После загрузки доступны кнопки:\n' +
-	'• Минифицировать — любая графика: растровая (JPG, PNG, GIF, WebP, ICO) и векторная (SVG)\n' +
-	'• Минифицировать и преобразовать в WebP — растр минифицируется и преобразуется в WebP, вектор (SVG) только минифицируется. Растр и вектор можно загрузить вместе.\n' +
-	'• Преобразовать в WOFF2 — шрифты TTF\n\n' +
-	'Для исходного качества лучше отправлять изображения файлом, а не фото — Telegram сжимает фото.';
+	'🗜 <b>Минифицировать</b> — любая графика: растровая (JPG, PNG, GIF, WebP, ICO) и векторная (SVG)\n' +
+	'🖼 <b>Минифицировать и преобразовать в WebP</b> — растр минифицируется и преобразуется в WebP, вектор (SVG) только минифицируется. Растр и вектор можно загрузить вместе.\n' +
+	'🔤 <b>Преобразовать в WOFF2</b> — шрифты TTF\n' +
+	'🗑 <b>Очистить</b> — удалить все загруженные файлы';
 
 /**
  * Per-user timer that fires after a burst of album/document updates stops.
@@ -253,6 +254,10 @@ function actionKeyboard(inventory) {
 		}
 	}
 
+	if (hasButton) {
+		keyboard.row().text('Очистить', 'act:clear_all');
+	}
+
 	return hasButton ? keyboard : undefined;
 }
 
@@ -394,7 +399,10 @@ export function createBot(token) {
 		pendingUploadBatch.delete(ctx.from.id);
 		uploadInflight.delete(ctx.from.id);
 		// Drop a leftover reply keyboard from older bot versions that used one.
-		await ctx.reply(START_TEXT, { reply_markup: { remove_keyboard: true } });
+		await ctx.reply(START_TEXT, {
+			parse_mode: 'HTML',
+			reply_markup: { remove_keyboard: true },
+		});
 	});
 
 	bot.on('message:photo', async (ctx) => {
