@@ -3,10 +3,16 @@ import path from 'node:path';
 import ttf2woff2 from 'ttf2woff2';
 import { listSourceFonts, userDirs } from '../storage.js';
 
+/** Convert a TTF buffer to WOFF2. The library returns Uint8Array; Node writeFile wants Buffer. */
 export function convertTtfToWoff2(buffer) {
 	return Buffer.from(ttf2woff2(buffer));
 }
 
+/**
+ * Convert every TTF in the user's `fonts/` folder.
+ * Failures are skipped so one corrupt file does not abort the rest of the batch.
+ * Successful paths are written to `fonts/dist/` and returned for Telegram delivery.
+ */
 export async function convertFonts(userId) {
 	const dirs = userDirs(userId);
 	const sources = await listSourceFonts(userId);

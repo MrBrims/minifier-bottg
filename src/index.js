@@ -11,8 +11,14 @@ if (!token) {
 
 const bot = createBot(token);
 
+// Shown in Telegram's command menu; the only user-facing command this bot exposes.
 await bot.api.setMyCommands([{ command: 'start', description: 'Начать' }]);
 
+/**
+ * Periodic cleanup of idle files on disk.
+ * Users currently running minify / convert / clear are skipped so the sweeper
+ * cannot delete files that job is still reading or writing.
+ */
 function runTtlSweep() {
 	purgeExpiredFiles({ skipUser: isUserBusy }).catch((error) => {
 		console.error('TTL sweep failed:', error);

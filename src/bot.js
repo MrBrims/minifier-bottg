@@ -15,6 +15,10 @@ import {
 	USER_STORAGE_LIMIT_BYTES,
 } from './storage.js';
 
+/**
+ * Soft cap for one debounce window. Telegram albums arrive as many separate updates,
+ * so this is counted in memory (`pendingUploadBatch`), not by scanning the disk.
+ */
 const MAX_FILES_PER_BATCH = 100;
 const BATCH_LIMIT_TEXT = 'Можно загрузить не более 100 файлов за раз.';
 
@@ -27,14 +31,34 @@ const START_TEXT =
 	'• Преобразовать в WOFF2 — шрифты TTF\n\n' +
 	'Для исходного качества лучше отправлять изображения файлом, а не фото — Telegram сжимает фото.';
 
+/**
+ * Per-user timer that fires after a burst of album/document updates stops.
+ * Each new file resets the delay so the action menu appears once, not per file.
+ */
 const albumTimers = new Map();
+
+/** Last status/menu message id so it can be deleted before a newer one is sent. */
 const lastMenu = new Map();
+
+/** Users currently running minify / convert / clear — blocks overlapping jobs and TTL. */
 const busyUsers = new Set();
-/** File kinds accumulated during the current upload debounce window. */
+
+/**
+ * File-kind counts accumulated during the current upload debounce window.
+ * Used to build the keyboard without waiting for a full disk inventory scan.
+ */
 const pendingUploadBatch = new Map();
-/** In-flight downloads per user — menu must wait until this is 0. */
+
+/**
+ * In-flight Telegram downloads per user. The menu must not appear while this is > 0,
+ * otherwise buttons show up before the last file is written to disk.
+ */
 const uploadInflight = new Map();
 
+/**
+ * TTL sweep passes directory names (strings); `busyUsers` stores numeric Telegram ids.
+ * Coerce so a busy user is actually skipped during purge.
+ */
 export function isUserBusy(userId) {
 	return busyUsers.has(Number(userId));
 }
@@ -52,9 +76,12 @@ function endUpload(userId) {
 	}
 }
 
+/**
+ * Send "Загружаю файлы…" once per pending batch.
+ * Handlers often finish one file before the next starts, so inflight briefly hits 0;
+ * `uploadingMessageSent` prevents a new status message on every file.
+ */
 async function ensureUploadingMessage(bot, chatId, userId) {
-	// Once per pending batch — handlers often finish one file before the next starts,
-	// so inflight briefly hits 0 and must not recreate the status message.
 	const batch = pendingUploadBatch.get(userId);
 	if (!batch || batch.uploadingMessageSent) {
 		return;
@@ -66,7 +93,7 @@ async function ensureUploadingMessage(bot, chatId, userId) {
 		try {
 			await bot.api.deleteMessage(chatId, previousId);
 		} catch {
-			// Previous menu may already be gone.
+			// Previous menu may already be gone (user deleted it, or chat was cleared).
 		}
 		lastMenu.delete(userId);
 	}
@@ -101,6 +128,11 @@ function batchFileCount(batch) {
 	return (batch.raster || 0) + (batch.svg || 0) + (batch.ico || 0) + (batch.font || 0);
 }
 
+/**
+ * Reject files beyond `MAX_FILES_PER_BATCH` in the current debounce window.
+ * The warning is sent once per window so a 100+ album does not spam the chat.
+ * The menu is still scheduled so files already accepted remain actionable.
+ */
 async function rejectIfBatchFull(ctx, bot, userId) {
 	const batch = pendingUploadBatch.get(userId);
 	const count = batchFileCount(batch);
@@ -130,6 +162,7 @@ function inventoryFromCounts(counts) {
 	return inventory;
 }
 
+/** Record a successful classification into the in-memory batch (before download finishes). */
 function noteUploadKind(userId, kind) {
 	let batch = pendingUploadBatch.get(userId);
 	if (!batch) {
@@ -151,6 +184,7 @@ function noteUploadKind(userId, kind) {
 	batch.hasFonts = batch.font > 0;
 }
 
+/** Roll back `noteUploadKind` if download or save fails, so the menu matches the disk. */
 function unnoteUploadKind(userId, kind) {
 	const batch = pendingUploadBatch.get(userId);
 	if (!batch) {
@@ -171,6 +205,7 @@ function unnoteUploadKind(userId, kind) {
 	batch.hasFonts = batch.font > 0;
 }
 
+/** Consume the debounce window's counts and clear the map so the next album starts fresh. */
 function takeUploadBatch(userId) {
 	const batch = pendingUploadBatch.get(userId);
 	pendingUploadBatch.delete(userId);
@@ -212,6 +247,7 @@ function actionKeyboard(inventory) {
 		}
 		keyboard.text('Минифицировать', 'act:minify');
 		hasButton = true;
+		// SVG and ICO stay in their formats; the extra WebP button only makes sense with raster.
 		if (inventory.hasRaster) {
 			keyboard.row().text('Минифицировать и преобразовать в WebP', 'act:webp');
 		}
@@ -220,14 +256,16 @@ function actionKeyboard(inventory) {
 	return hasButton ? keyboard : undefined;
 }
 
+/**
+ * Replace the previous status/menu with a new one at the bottom of the chat.
+ * Editing the old message would leave action buttons above newly uploaded files.
+ */
 async function showActionMenu(bot, chatId, userId, inventory) {
 	const resolved = inventory ?? (await getInventory(userId));
 	const text = inventorySummary(resolved);
 	const replyMarkup = actionKeyboard(resolved);
 	const previousId = lastMenu.get(userId);
 
-	// Always send a new menu after the latest message in the chat.
-	// Editing the previous menu keeps buttons above newly uploaded files.
 	if (previousId) {
 		try {
 			await bot.api.deleteMessage(chatId, previousId);
@@ -243,6 +281,10 @@ async function showActionMenu(bot, chatId, userId, inventory) {
 	lastMenu.set(userId, message.message_id);
 }
 
+/**
+ * Debounce the action menu: 600 ms after the last file update, or keep waiting
+ * while downloads are still in flight. Then check quota and show buttons.
+ */
 function scheduleActionMenu(bot, chatId, userId) {
 	const existing = albumTimers.get(userId);
 	if (existing) {
@@ -303,10 +345,12 @@ function documentFilename(document) {
 	if (path.extname(original)) {
 		return original;
 	}
+	// Telegram sometimes omits the extension; MIME from the Bot API is the fallback.
 	const ext = extensionFromMime(document.mime_type);
 	return ext ? `${original}${ext}` : original;
 }
 
+/** Persist an uploaded buffer into the matching per-user folder, or `null` if unsupported. */
 async function saveIncoming(userId, filename, buffer) {
 	const dirs = await ensureUserDirs(userId);
 	const kind = classifyByName(filename);
@@ -319,6 +363,10 @@ async function saveIncoming(userId, filename, buffer) {
 	return null;
 }
 
+/**
+ * Serialize jobs per user so two overlapping callbacks cannot race on the same folders,
+ * and so the TTL sweeper can skip this user via `isUserBusy`.
+ */
 function withBusy(userId, fn) {
 	return async (ctx) => {
 		if (busyUsers.has(userId)) {
@@ -345,6 +393,7 @@ export function createBot(token) {
 		lastMenu.delete(ctx.from.id);
 		pendingUploadBatch.delete(ctx.from.id);
 		uploadInflight.delete(ctx.from.id);
+		// Drop a leftover reply keyboard from older bot versions that used one.
 		await ctx.reply(START_TEXT, { reply_markup: { remove_keyboard: true } });
 	});
 
@@ -352,6 +401,7 @@ export function createBot(token) {
 		if (!ctx.from || !ctx.chat) {
 			return;
 		}
+		// Telegram sends every thumbnail size; the last entry is the largest.
 		const photo = ctx.message.photo.at(-1);
 		if (!photo) {
 			return;
@@ -413,11 +463,13 @@ export function createBot(token) {
 		if (!ctx.from || !ctx.chat) {
 			return;
 		}
+		// Answer first — Telegram times out the loading spinner on the button otherwise.
 		await ctx.answerCallbackQuery();
 		await withBusy(ctx.from.id, async () => {
 			await ctx.reply('Преобразую шрифты в WOFF2…');
 			const { outputs, errors } = await convertFonts(ctx.from.id);
 			await sendResultFiles(bot, ctx.chat.id, outputs);
+			// Keep sources when every file failed so the user can retry without re-uploading.
 			if (outputs.length) {
 				await clearFontJobFiles(ctx.from.id);
 			}
