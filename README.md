@@ -4,7 +4,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](https://docs.docker.com/compose/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg)](https://core.telegram.org/bots)
 [![License](https://img.shields.io/badge/License-ISC-yellow.svg)](https://opensource.org/licenses/ISC)
-[![Version](https://img.shields.io/badge/Version-1.3.0-green.svg)](#changelog)
+[![Version](https://img.shields.io/badge/Version-1.4.0-green.svg)](#changelog)
 
 A Dockerized Telegram bot for image optimization and font conversion: raster images are minified and optionally converted to WebP, SVG and ICO files are minified in place, and TTF fonts are converted to WOFF2.
 
@@ -13,6 +13,8 @@ A Dockerized Telegram bot for image optimization and font conversion: raster ima
 Minifi Bot is a Telegram frontend for the same processing pipeline as the Gulp-based minifier CLI: JPEG, PNG, GIF, and WebP go through sharp; SVG through SVGO; ICO stays ICO (icojs + sharp, no WebP); TTF becomes WOFF2 via `ttf2woff2`.
 
 Each Telegram user has an isolated folder under `data/{userId}/`. After `/start`, the bot asks to upload images or fonts. Inline buttons appear according to what was uploaded. Results are sent as documents, or as a single ZIP if there are more than 2 files. After a successful send, sources and processed files for that job are deleted; leftover files expire after 10 minutes.
+
+The UI is Russian or English. By default it follows Telegram’s `language_code` (Russian only if the code starts with `ru`; otherwise English). `/lang` pins a language; that choice is stored under `data/prefs/` so clearing uploads and the file TTL do not reset it.
 
 ## Requirements
 
@@ -68,7 +70,13 @@ User files persist in `./data` (mounted into the container as `/app/data`).
 
 ### Start
 
-Send `/start`. The bot replies: upload images or a font. While files are downloading, it shows **Загружаю файлы…**. Telegram compresses photos — send images as **files** (documents) when you need the original quality.
+Send `/start`. The bot replies in the user’s language: upload images or a font. While files are downloading, it shows a loading message. Telegram compresses photos — send images as **files** (documents) when you need the original quality.
+
+### Language
+
+Replies, buttons, and the command menu follow the Telegram client language (`ru*` → Russian, everything else → English).
+
+Send `/lang` to pin **Русский**, **English**, or **Match Telegram**. The pin is kept in `data/prefs/{userId}.json` and survives “Clear” and the 10-minute TTL. **Match Telegram** removes the pin and uses `language_code` again.
 
 ### Inline actions (after upload)
 
@@ -128,7 +136,9 @@ If more than 2 result files are produced, they are packed into `result.zip`.
 minifi-bot/
 ├── src/
 │   ├── index.js              # Bot entry, /start command, file TTL sweep
-│   ├── bot.js                # /start, uploads, inline actions, quota warning
+│   ├── bot.js                # /start, /lang, uploads, inline actions, quota warning
+│   ├── i18n.js               # ru/en catalogs; locale from Telegram or /lang pin
+│   ├── prefs.js              # Persist /lang override in data/prefs/
 │   ├── storage.js            # Per-user dirs, sizes, TTL purge, job/full cleanup
 │   ├── classify.js           # raster / svg / ico / ttf
 │   ├── send.js               # Send documents; ZIP if files > 2
@@ -136,6 +146,7 @@ minifi-bot/
 │       ├── images.js         # sharp, SVGO, icojs
 │       └── fonts.js          # TTF → WOFF2
 ├── data/                     # Per-user files (gitignored, Docker volume)
+│   └── prefs/                # /lang pins (`{userId}.json`); not cleared by TTL
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile                  # docker compose wrappers (make help)
@@ -154,6 +165,10 @@ minifi-bot/
 - **Outputs disappeared** — files are removed after a successful send, or 10 minutes after upload if they were never sent. The **Clear files** button empties the whole user folder when storage exceeds 200 MB.
 
 ## Changelog
+
+### 1.4.0
+
+- **NEW**: Russian and English UI from Telegram `language_code`, with `/lang` to pin a language
 
 ### 1.3.0
 
